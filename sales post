@@ -1,0 +1,177 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sales Invoice Form Extension</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;padding:20px}
+
+.ctrl-bar{display:flex;gap:10px;align-items:center;margin-bottom:15px;background:#161b22;padding:12px;border-radius:10px;border:1px solid #30363d}
+.load-btn{background:#58a6ff;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600}
+.prog-wrap{flex:1;height:5px;background:#30363d;border-radius:4px;overflow:hidden}
+.prog-bar{height:100%;width:0;background:#58a6ff}
+.status-txt{font-size:12px;color:#8b949e}
+
+.form-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px}
+.row{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;margin-bottom:10px}
+select,input{background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px;border-radius:6px}
+button{cursor:pointer}
+
+.add-btn{margin-top:10px;background:#238636;color:#fff;border:none;padding:8px 12px;border-radius:6px}
+.total-box{margin-top:15px;font-size:18px;font-weight:bold}
+.error{color:#f85149;font-size:12px}
+
+.badge{font-size:11px;color:#8b949e} </style>
+
+</head>
+<body>
+
+<div class="ctrl-bar">
+<button class="load-btn" id="load-btn" onclick="loadAllRecords()">⬇ Load</button>
+<div class="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
+<span class="status-txt" id="status-txt">Load data</span>
+</div>
+
+<div id="app"></div>
+
+<script>
+function postMessageWithResponse(message){
+return new Promise((resolve,reject)=>{
+const requestId=crypto.randomUUID();
+const timer=setTimeout(()=>{window.removeEventListener('message',handler);reject(new Error('Timeout'));},15000);
+function handler(event){
+if(event.data?.type?.endsWith('-response')&&event.data?.requestId===requestId){
+clearTimeout(timer);window.removeEventListener('message',handler);resolve(event.data.body);
+}}
+window.addEventListener('message',handler);
+window.parent.postMessage({...message,requestId},'*');
+});
+}
+
+async function getSalesInvoiceBatch(onProgress){
+const allItems=[];let nextToken=null;let pageNum=0;let apiTotal=null;
+do{
+const path=nextToken?'/api4/sales-invoice-batch?PageSize=99999&next_page_token='+encodeURIComponent(nextToken):'/api4/sales-invoice-batch?PageSize=99999';
+const data=await postMessageWithResponse({type:'api-request',method:'GET',path});
+const page=Array.isArray(data)?data:(data.items||[]);
+allItems.push(...page);
+nextToken=data.next_page_token||null;
+if(apiTotal===null){apiTotal=data.totalCount??null;}
+pageNum++;
+if(onProgress)onProgress(allItems.length,apiTotal,pageNum);
+}while(nextToken);
+return allItems;
+}
+
+async function loadAllRecords(){
+const btn=document.getElementById('load-btn');
+const bar=document.getElementById('prog-bar');
+const status=document.getElementById('status-txt');
+btn.disabled=true;btn.textContent='Loading...';
+try{
+const items=await getSalesInvoiceBatch((l,t,p)=>{
+status.textContent=`Page ${p} · ${l}`;
+});
+bar.style.width='100%';
+status.textContent=`Loaded ${items.length}`;
+btn.disabled=false;btn.textContent='Reload';
+render(items);
+}catch(e){
+status.textContent='Error';btn.disabled=false;
+}
+}
+
+function render(items){
+const app=document.getElementById('app');
+if(!items.length){
+app.innerHTML='<p>No data</p>';return;
+}
+
+/* Build item balance map */
+const balanceMap={};
+items.forEach(inv=>{
+inv?.item?.lines?.forEach(l=>{
+const id=l?.item;
+if(!id)return;
+balanceMap[id]=(balanceMap[id]||0)+l.qty;
+});
+});
+
+/* unique items */
+const itemIds=Object.keys(balanceMap);
+
+let rows=[];
+
+function addRow(){
+rows.push({item:null,qty:1,price:0,error:''});
+draw();
+}
+
+function updateRow(i,key,val){
+rows[i][key]=val;
+validate(i);
+draw();
+}
+
+function validate(i){
+const r=rows[i];
+r.error='';
+if(!r.item)return;
+
+const bal=balanceMap[r.item]||0;
+
+if(r.qty<=0){
+r.error='Qty must be > 0';
+}
+if(r.qty>bal){
+r.error='Exceeds balance';
+}
+}
+
+function total(){
+return rows.reduce((a,r)=>a+(r.qty*r.price||0),0);
+}
+
+function draw(){
+app.innerHTML=`
+<div class="form-card">
+<h3>Sales Form</h3>
+
+${rows.map((r,i)=>`
+<div class="row">
+<select onchange="updateRow(${i},'item',this.value)">
+<option value="">Select Item</option>
+${itemIds.map(id=>`<option value="${id}" ${r.item===id?'selected':''}>${id.slice(0,6)}</option>`).join('')}
+</select>
+
+<input type="number" value="${r.qty}" min="1" onchange="updateRow(${i},'qty',parseFloat(this.value))">
+
+<input type="number" value="${r.price}" min="0" onchange="updateRow(${i},'price',parseFloat(this.value))">
+
+<div>
+<span class="badge">Bal:</span><br>
+${r.item?(balanceMap[r.item]||0):'-'}
+</div>
+
+<button onclick="rows.splice(${i},1);draw()">❌</button>
+
+${r.error?`<div class="error">${r.error}</div>`:''}
+</div>
+`).join('')}
+
+<button class="add-btn" onclick="addRow()">+ Add Line</button>
+
+<div class="total-box">Total: ₦ ${total().toLocaleString(undefined,{minimumFractionDigits:2})}</div>
+</div>
+`;
+}
+
+addRow();
+}
+</script>
+
+</body>
+</html>
